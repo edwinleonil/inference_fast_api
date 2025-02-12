@@ -1,26 +1,39 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import JSONResponse
-from torchvision import transforms
-from PIL import Image
+import logging
+from fastapi import FastAPI, Depends, HTTPException, status, File, UploadFile
+from fastapi.security.api_key import APIKeyHeader
+from typing import List
 import torch
+from torchvision import models, transforms
+from PIL import Image
 import io
-import uvicorn
-from timm.models.vision_transformer import VisionTransformer
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
-# Allowlist the VisionTransformer class
-torch.serialization.add_safe_globals([VisionTransformer])
+API_KEY = "your-secret-api-key"
+API_KEY_NAME = "access_token"
+api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
 
-# Check if CUDA is available and set the device accordingly
+
+def get_api_key(api_key_header: str = Depends(api_key_header)):
+    if api_key_header == API_KEY:
+        return api_key_header
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Could not validate credentials"
+        )
+
+
+# use gpu if available
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load the model
-model_path = 'model/ViT_classification.pth'
+model_path = 'model/ResNet50.pth'
 checkpoint = torch.load(model_path, weights_only=False, map_location=device)
 model = checkpoint['model']
 classes = checkpoint['class_names']
-model = model.to(device)
 model.eval()
 
 # Define the image transformations
@@ -32,28 +45,24 @@ transform = transforms.Compose([
 ])
 
 
-@app.post("/predict/")
-async def predict(file: UploadFile = File(None)):
-    if file is None:
-        raise HTTPException(status_code=400, detail="Image not passed")
-
-    # Read the image file
-    image_data = await file.read()
+@app.post("/predict", dependencies=[Depends(get_api_key)])
+async def predict(image: UploadFile = File(...)):
+    logger.info("Received prediction request")
+    image_data = await image.read()
     image = Image.open(io.BytesIO(image_data)).convert("RGB")
-
-    # Transform the image
     image = transform(image).unsqueeze(0).to(device)
 
-    # Perform inference
     with torch.no_grad():
         outputs = model(image)
         _, predicted = torch.max(outputs, 1)
 
-    # Get the class name
     class_name = classes[predicted.item()]
-
-    # Return the prediction
-    return JSONResponse(content={"prediction": class_name})
+    logger.info(f"Prediction result: {class_name}")
+    return {"class_name": class_name}
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+# test the API from a different PC with the following command:
+curl - X POST "http://172.16.49.197:8000/predict" - H "accept: application/json" - H "access_token: your-secret-api-key" - F "image=@C:\Users\me1elar\Documents\pin.png"
